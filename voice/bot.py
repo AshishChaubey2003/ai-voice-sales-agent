@@ -1,3 +1,4 @@
+import asyncio
 from datetime import UTC, datetime
 
 from loguru import logger
@@ -27,8 +28,12 @@ from pipecat.workers.runner import WorkerRunner
 
 from api.config import get_settings
 from api.db import build_engine, build_session_factory
+from api.embeddings import get_embedding_model
+from api.knowledge import GROUNDING_RULES
+from api.llm import GroqLLM
 from api.models import Agent, Conversation, Message
 from voice.metrics_observer import ServiceTTFBObserver
+from voice.rag import KnowledgeInjector
 from voice.turn_recorder import VoiceTurnRecorder
 
 VOICE_RULES = """Voice conversation rules (these override any earlier rule about language or format):
@@ -46,7 +51,7 @@ transport_params = {
 
 
 def build_voice_prompt(agent_prompt: str) -> str:
-    return f"{agent_prompt}\n\n{VOICE_RULES}"
+    return f"{agent_prompt}\n\n{GROUNDING_RULES}\n\n{VOICE_RULES}"
 
 
 def build_llm_settings(model: str, system_prompt: str, reasoning_effort: str | None):
@@ -125,6 +130,9 @@ async def run_session(transport, runner_args, settings, session_factory):
 
     logger.info(f"Voice conversation started: {conversation_id}")
 
+    # Load the embedding model before the visitor asks anything
+    await asyncio.to_thread(get_embedding_model)
+
     async def save_message(role: str, content: str, latency: dict) -> None:
         try:
             async with session_factory() as db:
@@ -155,6 +163,7 @@ async def run_session(transport, runner_args, settings, session_factory):
             "reasoning_effort": effort_label,
             "greeting": "fixed",
             "tts_provider": settings.tts_provider,
+            "rag": "on",
         },
     )
 
@@ -162,6 +171,22 @@ async def run_session(transport, runner_args, settings, session_factory):
     llm = GroqLLMService(api_key=groq_key, settings=llm_settings)
     tts = build_tts(settings)
     logger.info(f"Voice TTS provider: {settings.tts_provider}")
+
+    # Short timeout: in a voice call a slow rewrite is worse than no rewrite
+    rewriter = GroqLLM(
+        api_key=groq_key,
+        model=settings.groq_model,
+        timeout_seconds=4.0,
+        max_output_tokens=200,
+        reasoning_effort="low",
+    )
+    knowledge_injector = KnowledgeInjector(
+        session_factory=session_factory,
+        organization_id=org_id,
+        settings=settings,
+        rewriter=rewriter,
+        on_retrieval=recorder.record_retrieval,
+    )
 
     context = LLMContext()
     user_aggregator, assistant_aggregator = LLMContextAggregatorPair(
@@ -193,6 +218,7 @@ async def run_session(transport, runner_args, settings, session_factory):
             transport.input(),
             stt,
             user_aggregator,
+            knowledge_injector,
             llm,
             tts,
             transport.output(),
@@ -224,6 +250,10 @@ async def run_session(transport, runner_args, settings, session_factory):
     try:
         await runner.run()
     finally:
+        try:
+            await rewriter.close()
+        except Exception:
+            logger.warning("Query rewriter cleanup skipped during shutdown")
         try:
             async with session_factory() as db:
                 await db.execute(

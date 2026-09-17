@@ -23,3 +23,4 @@ class ChatReply(BaseModel):
     conversation_id: uuid.UUID
     reply: str
     llm_latency_ms: int
+    sources: list[str] = Field(default_factory=list)

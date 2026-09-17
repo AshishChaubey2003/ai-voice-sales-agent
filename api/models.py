@@ -1,7 +1,12 @@
 import uuid
 from datetime import datetime
 
+import uuid
+from datetime import datetime
+
+from pgvector.sqlalchemy import Vector
 from sqlalchemy import (
+    Computed,
     DateTime,
     ForeignKey,
     ForeignKeyConstraint,
@@ -11,10 +16,12 @@ from sqlalchemy import (
     UniqueConstraint,
     func,
 )
-from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.dialects.postgresql import JSONB, TSVECTOR
 from sqlalchemy.orm import Mapped, mapped_column
 
 from api.db import Base
+
+EMBEDDING_DIM = 384
 
 
 class TimestampMixin:
@@ -88,3 +95,53 @@ class Message(TimestampMixin, Base):
         ),
         Index("ix_messages_conversation_created", "conversation_id", "created_at"),
     )
+    
+class KnowledgeDocument(TimestampMixin, Base):
+    __tablename__ = "knowledge_documents"
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    organization_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("organizations.id", ondelete="CASCADE")
+    )
+    title: Mapped[str] = mapped_column(String(200))
+    source: Mapped[str] = mapped_column(String(300))
+    content_hash: Mapped[str] = mapped_column(String(64))
+
+    __table_args__ = (
+        UniqueConstraint("id", "organization_id"),
+        UniqueConstraint("organization_id", "source"),
+    )
+
+
+class KnowledgeChunk(TimestampMixin, Base):
+    __tablename__ = "knowledge_chunks"
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    organization_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("organizations.id", ondelete="CASCADE")
+    )
+    document_id: Mapped[uuid.UUID]
+    chunk_index: Mapped[int]
+    heading: Mapped[str] = mapped_column(String(300))
+    content: Mapped[str] = mapped_column(Text)
+    embedding: Mapped[list[float]] = mapped_column(Vector(EMBEDDING_DIM))
+    search_vector: Mapped[str] = mapped_column(
+        TSVECTOR,
+        Computed("to_tsvector('english', heading || ' ' || content)", persisted=True),
+    )
+
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["document_id", "organization_id"],
+            ["knowledge_documents.id", "knowledge_documents.organization_id"],
+            ondelete="CASCADE",
+        ),
+        Index("ix_knowledge_chunks_org_document", "organization_id", "document_id"),
+        Index(
+            "ix_knowledge_chunks_embedding",
+            "embedding",
+            postgresql_using="hnsw",
+            postgresql_ops={"embedding": "vector_cosine_ops"},
+        ),
+        Index("ix_knowledge_chunks_search_vector", "search_vector", postgresql_using="gin"),
+    )    

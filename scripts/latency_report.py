@@ -9,10 +9,17 @@ from voice.stats import percentile
 
 ROLE_METRICS = {
     "user": ["stt_ttfb_ms"],
-    "assistant": ["llm_ttfb_ms", "tts_ttfb_ms", "voice_to_voice_ms", "first_speech_ms"],
+    "assistant": [
+        "rag_ms",
+        "llm_ttfb_ms",
+        "tts_ttfb_ms",
+        "voice_to_voice_ms",
+        "first_speech_ms",
+    ],
 }
 REPORT_ORDER = [
     "stt_ttfb_ms",
+    "rag_ms",
     "llm_ttfb_ms",
     "first_llm_ttfb_ms",
     "tts_ttfb_ms",
@@ -44,7 +51,8 @@ async def load_rows():
 def build_label(latency: dict) -> str:
     reasoning = latency.get("reasoning_effort", "unknown")
     tts = latency.get("tts_provider", "groq")
-    return f"reasoning={reasoning} | tts={tts}"
+    rag = latency.get("rag", "off")
+    return f"reasoning={reasoning} | tts={tts} | rag={rag}"
 
 
 def group_metrics(rows):

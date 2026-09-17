@@ -11,3 +11,5 @@ groq>=0.9
 pipecat-ai[groq,silero,runner,webrtc]>=1.8
 loguru
 pipecat-ai[groq,silero,runner,webrtc,deepgram]>=1.8
+fastembed
+pgvector

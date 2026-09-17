@@ -60,3 +60,18 @@ async def test_empty_turns_and_zero_metrics_are_ignored():
     await recorder.assistant_turn_finished(None, interrupted=True)
 
     assert store.saved == []
+
+
+@pytest.mark.anyio
+async def test_retrieval_details_are_saved_on_the_assistant_turn():
+    store = FakeStore()
+    recorder = VoiceTurnRecorder(store.save)
+
+    recorder.record_retrieval(35, ["NimbusCRM Pricing > Pro plan"], None)
+    await recorder.assistant_turn_finished("The Pro plan is $29.", interrupted=False)
+
+    assert store.saved[0][2] == {
+        "rag_ms": 35,
+        "rag_sources": ["NimbusCRM Pricing > Pro plan"],
+        "interrupted": False,
+    }

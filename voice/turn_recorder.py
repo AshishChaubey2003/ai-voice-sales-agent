@@ -17,6 +17,9 @@ class VoiceTurnRecorder:
         self._tts_ms: int | None = None
         self._voice_to_voice_ms: int | None = None
         self._first_speech_ms: int | None = None
+        self._rag_ms: int | None = None
+        self._rag_sources: list[str] | None = None
+        self._rag_rewritten_query: str | None = None
 
     def record_service_ttfb(self, processor_name: str, seconds: float | None) -> None:
         if not seconds or seconds <= 0:
@@ -38,6 +41,13 @@ class VoiceTurnRecorder:
         if seconds and seconds > 0:
             self._first_speech_ms = round(seconds * 1000)
 
+    def record_retrieval(
+        self, elapsed_ms: int, sources: list[str], rewritten_query: str | None
+    ) -> None:
+        self._rag_ms = elapsed_ms
+        self._rag_sources = list(sources)
+        self._rag_rewritten_query = rewritten_query
+
     async def user_turn_finished(self, text: str | None) -> None:
         metrics = {"stt_ttfb_ms": self._stt_ms}
         self._stt_ms = None
@@ -51,6 +61,9 @@ class VoiceTurnRecorder:
             "tts_ttfb_ms": self._tts_ms,
             "voice_to_voice_ms": self._voice_to_voice_ms,
             "first_speech_ms": self._first_speech_ms,
+            "rag_ms": self._rag_ms,
+            "rag_sources": self._rag_sources,
+            "rag_rewritten_query": self._rag_rewritten_query,
         }
         self._clear_assistant_metrics()
         text = (text or "").strip()
