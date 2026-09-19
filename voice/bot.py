@@ -4,6 +4,7 @@ from datetime import UTC, datetime
 from loguru import logger
 from sqlalchemy import select, update
 
+from pipecat.adapters.schemas.tools_schema import ToolsSchema
 from pipecat.audio.vad.silero import SileroVADAnalyzer
 from pipecat.frames.frames import TTSSpeakFrame
 from pipecat.observers.user_bot_latency_observer import UserBotLatencyObserver
@@ -30,8 +31,14 @@ from api.config import get_settings
 from api.db import build_engine, build_session_factory
 from api.embeddings import get_embedding_model
 from api.knowledge import GROUNDING_RULES
+from api.leads import LEAD_CAPTURE_RULES
 from api.llm import GroqLLM
 from api.models import Agent, Conversation, Message
+from voice.lead_tool import (
+    VOICE_LEAD_RULES,
+    build_save_lead_handler,
+    build_save_lead_schema,
+)
 from voice.metrics_observer import ServiceTTFBObserver
 from voice.rag import KnowledgeInjector
 from voice.turn_recorder import VoiceTurnRecorder
@@ -51,7 +58,11 @@ transport_params = {
 
 
 def build_voice_prompt(agent_prompt: str) -> str:
-    return f"{agent_prompt}\n\n{GROUNDING_RULES}\n\n{VOICE_RULES}"
+    # Lead capture rules go last: the model follows the end of a long prompt more reliably.
+    return (
+        f"{agent_prompt}\n\n{GROUNDING_RULES}\n\n{VOICE_RULES}\n\n"
+        f"{LEAD_CAPTURE_RULES}\n\n{VOICE_LEAD_RULES}"
+    )
 
 
 def build_llm_settings(model: str, system_prompt: str, reasoning_effort: str | None):
@@ -172,6 +183,16 @@ async def run_session(transport, runner_args, settings, session_factory):
     tts = build_tts(settings)
     logger.info(f"Voice TTS provider: {settings.tts_provider}")
 
+    llm.register_function(
+        "save_lead",
+        build_save_lead_handler(
+            session_factory=session_factory,
+            organization_id=org_id,
+            conversation_id=conversation_id,
+        ),
+    )
+    logger.info("Registered tools: save_lead")
+
     # Short timeout: in a voice call a slow rewrite is worse than no rewrite
     rewriter = GroqLLM(
         api_key=groq_key,
@@ -188,7 +209,7 @@ async def run_session(transport, runner_args, settings, session_factory):
         on_retrieval=recorder.record_retrieval,
     )
 
-    context = LLMContext()
+    context = LLMContext(tools=ToolsSchema(standard_tools=[build_save_lead_schema()]))
     user_aggregator, assistant_aggregator = LLMContextAggregatorPair(
         context,
         user_params=LLMUserAggregatorParams(vad_analyzer=SileroVADAnalyzer()),

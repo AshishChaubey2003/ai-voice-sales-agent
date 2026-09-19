@@ -1,4 +1,10 @@
-from voice.rag import KNOWLEDGE_MARKER, is_knowledge_message, latest_user_text, with_knowledge
+from voice.rag import (
+    KNOWLEDGE_MARKER,
+    is_knowledge_message,
+    is_tool_result,
+    latest_user_text,
+    with_knowledge,
+)
 
 
 def test_latest_user_text_ignores_knowledge_messages():
@@ -34,3 +40,13 @@ def test_with_knowledge_replaces_the_previous_knowledge_message():
     assert len(knowledge) == 1
     assert "$49" in knowledge[0]["content"]
     assert updated[-1] is knowledge[0]
+
+
+def test_tool_results_do_not_trigger_a_new_search():
+    messages = [
+        {"role": "user", "content": "Call me please"},
+        {"role": "tool", "tool_call_id": "call_1", "content": '{"status": "saved"}'},
+    ]
+
+    assert is_tool_result(messages)
+    assert not is_tool_result([{"role": "user", "content": "Hi"}])

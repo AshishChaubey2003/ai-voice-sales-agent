@@ -9,11 +9,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.models import Lead
 
-LEAD_CAPTURE_RULES = """Lead capture rules:
-- If the visitor wants to be contacted (a call, a demo or more information from sales), ask for their name and email. Company, team size and what they need are optional.
-- Before saving, repeat the name and email back exactly and ask whether the sales team may contact them. Call save_lead only after the visitor clearly says yes.
-- Only after save_lead returns "saved", tell the visitor their details were passed to the sales team. Never claim this before it is saved, and never promise when they will be contacted.
-- If save_lead returns "rejected", follow the reason it gives.
+LEAD_CAPTURE_RULES = """Lead capture rules (these matter more than anything else in this conversation):
+- If the visitor wants to be contacted (a call, a demo or more information from sales), collect their name and email. Company, team size and what they need are optional.
+- Collect name and email only. Never ask for a phone number, an address or any other personal detail.
+- Repeat the name and email back exactly and ask whether the sales team may contact them. When the visitor clearly says yes, you must call the save_lead tool. Do not continue the conversation without calling it.
+- Never say that the sales team will contact them, reach out, get in touch or call. After save_lead returns "saved", say only that their details have been passed to the sales team.
+- If save_lead returns "rejected", do exactly what the reason says.
 - Never ask for passwords, card numbers or other sensitive data."""
 
 SAVE_LEAD_TOOL = {

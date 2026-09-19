@@ -43,6 +43,12 @@ def is_knowledge_message(message) -> bool:
     )
 
 
+def is_tool_result(messages) -> bool:
+    """True when the LLM is being re-run with a tool result, not a new visitor message."""
+    last = messages[-1] if messages else None
+    return isinstance(last, dict) and last.get("role") == "tool"
+
+
 def conversation_turns(messages) -> list[dict[str, str]]:
     turns = []
     for message in messages:
@@ -109,6 +115,9 @@ class KnowledgeInjector(FrameProcessor):
 
     async def _inject(self, context) -> None:
         messages = list(context.get_messages())
+        if is_tool_result(messages):
+            return
+
         query = latest_user_text(messages)
         if not query:
             return
