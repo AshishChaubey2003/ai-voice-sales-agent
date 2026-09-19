@@ -1,3 +1,4 @@
+import json
 import uuid
 
 import pytest
@@ -7,9 +8,16 @@ from sqlalchemy import delete, select
 from api.db import build_engine, build_session_factory
 from api.deps import get_knowledge_search, get_llm
 from api.knowledge import RetrievedChunk, SearchResult
-from api.llm import LLMError, LLMReply
+from api.llm import LLMError, LLMReply, ToolCall
 from api.main import app
-from api.models import Agent, Message, Organization
+from api.models import Agent, Lead, Message, Organization
+
+PRO_PLAN_CHUNK = RetrievedChunk(
+    chunk_id=uuid.uuid4(),
+    title="NimbusCRM Pricing",
+    heading="NimbusCRM Pricing > Pro plan",
+    content="$29 per user per month.",
+)
 
 
 class FakeLLM:
@@ -18,7 +26,7 @@ class FakeLLM:
         self.calls = []
         self.prompts = []
 
-    async def generate(self, system_prompt, history):
+    async def generate(self, system_prompt, history, tools=None, tool_choice=None):
         self.prompts.append(system_prompt)
         self.calls.append(history)
         if self.fail:
@@ -31,9 +39,10 @@ class ScriptedLLM:
         self.replies = list(replies)
         self.prompts = []
 
-    async def generate(self, system_prompt, history):
+    async def generate(self, system_prompt, history, tools=None, tool_choice=None):
         self.prompts.append(system_prompt)
-        return LLMReply(text=self.replies.pop(0), latency_ms=10)
+        reply = self.replies.pop(0)
+        return reply if isinstance(reply, LLMReply) else LLMReply(text=reply, latency_ms=10)
 
 
 def fake_search(chunks=None):
@@ -41,6 +50,14 @@ def fake_search(chunks=None):
         return SearchResult(chunks=list(chunks or []), elapsed_ms=1)
 
     return search
+
+
+def lead_tool_call(**arguments):
+    return LLMReply(
+        text="",
+        latency_ms=10,
+        tool_calls=[ToolCall(id="call_1", name="save_lead", arguments=json.dumps(arguments))],
+    )
 
 
 @pytest.fixture
@@ -80,6 +97,21 @@ async def start_conversation(client, agent_id):
     return response.json()["conversation_id"]
 
 
+async def send(client, conversation_id, content):
+    return await client.post(
+        f"/v1/conversations/{conversation_id}/messages", json={"content": content}
+    )
+
+
+async def leads_for(session_factory, conversation_id):
+    async with session_factory() as session:
+        return (
+            await session.scalars(
+                select(Lead).where(Lead.conversation_id == uuid.UUID(conversation_id))
+            )
+        ).all()
+
+
 @pytest.mark.anyio
 async def test_chat_saves_user_and_assistant_messages(setup):
     client, session_factory, agent_id = setup
@@ -87,10 +119,7 @@ async def test_chat_saves_user_and_assistant_messages(setup):
     app.dependency_overrides[get_llm] = lambda: fake
 
     conversation_id = await start_conversation(client, agent_id)
-    response = await client.post(
-        f"/v1/conversations/{conversation_id}/messages",
-        json={"content": "Hi, what do you sell?"},
-    )
+    response = await send(client, conversation_id, "Hi, what do you sell?")
 
     assert response.status_code == 200
     assert response.json()["reply"] == "Hello! How can I help you today?"
@@ -112,19 +141,10 @@ async def test_reply_prompt_is_grounded_in_retrieved_knowledge(setup):
     client, _, agent_id = setup
     fake = FakeLLM()
     app.dependency_overrides[get_llm] = lambda: fake
-    pro_plan = RetrievedChunk(
-        chunk_id=uuid.uuid4(),
-        title="NimbusCRM Pricing",
-        heading="NimbusCRM Pricing > Pro plan",
-        content="$29 per user per month.",
-    )
-    app.dependency_overrides[get_knowledge_search] = lambda: fake_search([pro_plan])
+    app.dependency_overrides[get_knowledge_search] = lambda: fake_search([PRO_PLAN_CHUNK])
 
     conversation_id = await start_conversation(client, agent_id)
-    response = await client.post(
-        f"/v1/conversations/{conversation_id}/messages",
-        json={"content": "How much is the Pro plan?"},
-    )
+    response = await send(client, conversation_id, "How much is the Pro plan?")
 
     assert response.status_code == 200
     assert response.json()["sources"] == ["NimbusCRM Pricing > Pro plan"]
@@ -152,14 +172,8 @@ async def test_follow_up_question_is_rewritten_when_first_search_finds_nothing(s
     app.dependency_overrides[get_llm] = lambda: llm
 
     conversation_id = await start_conversation(client, agent_id)
-    await client.post(
-        f"/v1/conversations/{conversation_id}/messages",
-        json={"content": "How much is the Pro plan?"},
-    )
-    response = await client.post(
-        f"/v1/conversations/{conversation_id}/messages",
-        json={"content": "And what about the Business plan?"},
-    )
+    await send(client, conversation_id, "How much is the Pro plan?")
+    response = await send(client, conversation_id, "And what about the Business plan?")
 
     assert response.status_code == 200
     assert response.json()["sources"] == ["NimbusCRM Pricing > Business plan"]
@@ -168,15 +182,58 @@ async def test_follow_up_question_is_rewritten_when_first_search_finds_nothing(s
 
 
 @pytest.mark.anyio
+async def test_lead_is_saved_after_details_are_read_back_and_visitor_says_yes(setup):
+    client, session_factory, agent_id = setup
+    app.dependency_overrides[get_knowledge_search] = lambda: fake_search([PRO_PLAN_CHUNK])
+    llm = ScriptedLLM(
+        [
+            "Just to confirm: Rahul, rahul@example.com. May our sales team contact you?",
+            lead_tool_call(name="Rahul", email="rahul@example.com", team_size=20),
+            "Thanks Rahul, I've passed your details to the sales team.",
+        ]
+    )
+    app.dependency_overrides[get_llm] = lambda: llm
+
+    conversation_id = await start_conversation(client, agent_id)
+    await send(client, conversation_id, "Please ask sales to call me. I'm Rahul, rahul@example.com")
+    response = await send(client, conversation_id, "Yes")
+
+    assert response.status_code == 200
+    assert response.json()["lead_status"] == "saved"
+    leads = await leads_for(session_factory, conversation_id)
+    assert len(leads) == 1
+    assert leads[0].email == "rahul@example.com"
+    assert leads[0].team_size == 20
+    assert leads[0].consent_reply == "Yes"
+
+
+@pytest.mark.anyio
+async def test_lead_is_not_saved_without_read_back_and_confirmation(setup):
+    client, session_factory, agent_id = setup
+    app.dependency_overrides[get_knowledge_search] = lambda: fake_search([PRO_PLAN_CHUNK])
+    llm = ScriptedLLM(
+        [
+            lead_tool_call(name="Rahul", email="rahul@example.com"),
+            "Just to confirm: Rahul, rahul@example.com. May our sales team contact you?",
+        ]
+    )
+    app.dependency_overrides[get_llm] = lambda: llm
+
+    conversation_id = await start_conversation(client, agent_id)
+    response = await send(client, conversation_id, "I'm Rahul, rahul@example.com, call me")
+
+    assert response.status_code == 200
+    assert response.json()["lead_status"] == "rejected"
+    assert await leads_for(session_factory, conversation_id) == []
+
+
+@pytest.mark.anyio
 async def test_llm_failure_returns_503_without_leaking_details(setup):
     client, _, agent_id = setup
     app.dependency_overrides[get_llm] = lambda: FakeLLM(fail=True)
 
     conversation_id = await start_conversation(client, agent_id)
-    response = await client.post(
-        f"/v1/conversations/{conversation_id}/messages",
-        json={"content": "Hello"},
-    )
+    response = await send(client, conversation_id, "Hello")
 
     assert response.status_code == 503
     assert response.json() == {"detail": "AI service temporarily unavailable"}
@@ -188,10 +245,7 @@ async def test_blank_message_is_rejected(setup):
     app.dependency_overrides[get_llm] = lambda: FakeLLM()
 
     conversation_id = await start_conversation(client, agent_id)
-    response = await client.post(
-        f"/v1/conversations/{conversation_id}/messages",
-        json={"content": "    "},
-    )
+    response = await send(client, conversation_id, "    ")
 
     assert response.status_code == 422
 

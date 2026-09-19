@@ -1,3 +1,4 @@
+import json
 import logging
 import uuid
 
@@ -14,6 +15,7 @@ from api.knowledge import (
     build_rewrite_input,
     clean_rewritten_query,
 )
+from api.leads import LEAD_CAPTURE_RULES, SAVE_LEAD_TOOL, save_lead_from_tool
 from api.llm import LLMClient, LLMError
 from api.models import Agent, Conversation, Message
 from api.schemas import ChatReply, ConversationCreate, ConversationCreated, MessageCreate
@@ -131,23 +133,63 @@ async def send_message(
                 search = retry
                 rewritten_query = candidate
 
-    system_prompt = build_grounded_system_prompt(agent.system_prompt, search.chunks)
+    system_prompt = (
+        f"{build_grounded_system_prompt(agent.system_prompt, search.chunks)}\n\n{LEAD_CAPTURE_RULES}"
+    )
     sources = [chunk.heading for chunk in search.chunks]
 
     # LLM call kai second le sakta hai: tab tak DB transaction band rakho
     await session.commit()
 
+    lead_status = None
     try:
-        result = await llm.generate(system_prompt, history)
+        result = await llm.generate(system_prompt, history, tools=[SAVE_LEAD_TOOL])
+        llm_ms = result.latency_ms
+
+        if result.tool_calls:
+            # The LLM proposes; the consent gate in save_lead_from_tool decides.
+            tool_messages = []
+            for call in result.tool_calls:
+                if call.name == "save_lead":
+                    outcome = await save_lead_from_tool(
+                        session,
+                        conversation.organization_id,
+                        conversation.id,
+                        history,
+                        call.arguments,
+                    )
+                    lead_status = outcome["status"]
+                else:
+                    outcome = {"status": "rejected", "reason": "Unknown tool."}
+                tool_messages.append(
+                    {"role": "tool", "tool_call_id": call.id, "content": json.dumps(outcome)}
+                )
+            await session.commit()
+
+            follow_up = [
+                *history,
+                {
+                    "role": "assistant",
+                    "content": result.text or None,
+                    "tool_calls": [call.to_message_part() for call in result.tool_calls],
+                },
+                *tool_messages,
+            ]
+            result = await llm.generate(
+                system_prompt, follow_up, tools=[SAVE_LEAD_TOOL], tool_choice="none"
+            )
+            llm_ms += result.latency_ms
     except LLMError:
         logger.exception("LLM call failed for conversation %s", conversation.id)
         raise HTTPException(
             status_code=503, detail="AI service temporarily unavailable"
         )
 
-    latency = {"llm": result.latency_ms, "rag": search.elapsed_ms, "rag_sources": sources}
+    latency = {"llm": llm_ms, "rag": search.elapsed_ms, "rag_sources": sources}
     if rewritten_query:
         latency["rag_rewritten_query"] = rewritten_query
+    if lead_status:
+        latency["lead"] = lead_status
 
     session.add(
         Message(
@@ -163,6 +205,7 @@ async def send_message(
     return ChatReply(
         conversation_id=conversation.id,
         reply=result.text,
-        llm_latency_ms=result.latency_ms,
+        llm_latency_ms=llm_ms,
         sources=sources,
+        lead_status=lead_status,
     )

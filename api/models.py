@@ -144,4 +144,31 @@ class KnowledgeChunk(TimestampMixin, Base):
             postgresql_ops={"embedding": "vector_cosine_ops"},
         ),
         Index("ix_knowledge_chunks_search_vector", "search_vector", postgresql_using="gin"),
-    )    
+    ) 
+    
+class Lead(TimestampMixin, Base):
+    __tablename__ = "leads"
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    organization_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("organizations.id", ondelete="CASCADE")
+    )
+    conversation_id: Mapped[uuid.UUID]
+    name: Mapped[str] = mapped_column(String(200))
+    email: Mapped[str] = mapped_column(String(320))
+    company: Mapped[str | None] = mapped_column(String(200))
+    team_size: Mapped[int | None]
+    need: Mapped[str | None] = mapped_column(Text)
+    consent_prompt: Mapped[str] = mapped_column(Text)
+    consent_reply: Mapped[str] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(String(20), default="new")
+
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["conversation_id", "organization_id"],
+            ["conversations.id", "conversations.organization_id"],
+            ondelete="CASCADE",
+        ),
+        UniqueConstraint("organization_id", "conversation_id"),
+        Index("ix_leads_org_created", "organization_id", "created_at"),
+    )       
